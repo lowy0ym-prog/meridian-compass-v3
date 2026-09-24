@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Kosher GPS</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+html,body,#map{height:100%;margin:0}body{font-family:system-ui,sans-serif;background:#101318;color:#fff;overflow:hidden}
+#map{position:absolute;inset:0}
+.panel{position:absolute;z-index:1000;left:12px;right:12px;top:12px;background:rgba(18,22,28,.94);border-radius:18px;padding:10px;box-shadow:0 6px 22px #0008}
+.row{display:flex;gap:7px}.row input{flex:1}.input{height:42px;border:0;border-radius:12px;padding:0 13px;font-size:16px;box-sizing:border-box}
+button{border:0;border-radius:12px;background:#1a73e8;color:#fff;font-weight:700;padding:0 13px;min-height:42px}
+button.secondary{background:#303640}button.good{background:#15803d}
+#results{max-height:190px;overflow:auto;margin-top:6px}.result{padding:10px;border-top:1px solid #ffffff18;font-size:14px}
+#bottom{position:absolute;z-index:1000;left:12px;right:12px;bottom:12px;background:rgba(18,22,28,.94);border-radius:18px;padding:10px;box-shadow:0 6px 22px #0008}
+#assistant{display:none;margin-top:8px}.small{font-size:12px;opacity:.75}.title{font-weight:800;font-size:18px}.pill{display:inline-block;padding:4px 8px;border-radius:20px;background:#303640;margin-right:5px}
+#photoBox{display:flex;gap:7px;overflow:auto;margin-top:8px}.photo{width:150px;height:95px;object-fit:cover;border-radius:10px;background:#333}
+#steps{max-height:120px;overflow:auto;font-size:13px}.step{padding:5px 0;border-bottom:1px solid #ffffff14}
+.leaflet-control-attribution{font-size:9px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+ <div class="row"><input id="q" class="input" placeholder="Search a place or address"><button onclick="search()">Search</button></div>
+ <div id="results"></div>
+ <div class="row" style="margin-top:7px">
+   <button class="secondary" onclick="locate()">📍 Me</button>
+   <button class="secondary" onclick="toggleSatellite()">🛰️ Satellite</button>
+   <button class="secondary" onclick="toggleAssistant()">🤖 Assistant</button>
+ </div>
+ <div id="assistant">
+   <div class="row"><input id="cmd" class="input" placeholder="Try: take me to Times Square"><button onclick="command()">Go</button></div>
+   <div class="row" style="margin-top:6px"><input id="key" class="input" type="password" placeholder="Optional OpenAI API key"><button class="secondary" onclick="saveKey()">Save</button></div>
+   <div id="answer" class="small" style="margin-top:6px"></div>
+ </div>
+</div>
+<div id="bottom">
+ <div id="place" class="title">Kosher GPS</div>
+ <div id="meta" class="small">Waiting for GPS…</div>
+ <div id="photoBox"></div>
+ <div id="routeInfo" style="margin-top:7px"></div>
+ <div id="steps"></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map=L.map('map',{zoomControl:false}).setView([40.758,-73.9855],13);
+L.control.zoom({position:'bottomright'}).addTo(map);
+const street=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+const sat=L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Sources: Esri, Maxar, Earthstar Geographics, USDA FSA, USGS, and the GIS User Community'});
+let satOn=false, me=null, dest=null, routeLine=null, lastReroute=0, watching=false, lastLat=null,lastLon=null;
+function locate(){if(me){map.setView(me.getLatLng(),17)}else{document.getElementById('meta').textContent='Waiting for GPS…'}}
+function toggleSatellite(){satOn=!satOn;if(satOn){map.removeLayer(street);sat.addTo(map)}else{map.removeLayer(sat);street.addTo(map)}}
+function search(){let q=document.getElementById('q').value.trim();if(q)Android.search(q)}
+function esc(s){return String(s||'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function onSearch(data){
+ const box=document.getElementById('results');box.innerHTML='';
+ (data||[]).forEach((x,i)=>{let d=document.createElement('div');d.className='result';d.innerHTML='<b>'+esc(x.display_name?.split(',')[0]||'Place')+'</b><br><span class="small">'+esc(x.display_name)+'</span><br><button style="margin-top:5px" onclick="choose('+i+')">Route here</button>';box.appendChild(d)});
+ window.searchResults=data||[];
+ if(window.searchResults[0]) showPlace(window.searchResults[0]);
+}
+function choose(i){let x=window.searchResults[i];showPlace(x);dest={lat:+x.lat,lon:+x.lon,name:x.display_name};if(lastLat!==null) Android.route(lastLat,lastLon,dest.lat,dest.lon);Android.photos(x.display_name.split(',').slice(0,3).join(' '));}
+function showPlace(x){document.getElementById('place').textContent=x.display_name?.split(',')[0]||'Place';document.getElementById('meta').textContent=x.display_name||''}
+function onNativeLocation(lat,lon,acc){
+ lastLat=lat;lastLon=lon;
+ if(!me){me=L.marker([lat,lon],{title:'You are here'}).addTo(map);map.setView([lat,lon],15)}else me.setLatLng([lat,lon]);
+ document.getElementById('meta').textContent='GPS accuracy '+Math.round(acc)+' m';
+ if(dest && Date.now()-lastReroute>20000){lastReroute=Date.now();Android.route(lat,lon,dest.lat,dest.lon)}
+}
+function onRoute(data){
+ if(!data?.routes?.length)return;
+ let r=data.routes[0];
+ if(routeLine)map.removeLayer(routeLine);
+ routeLine=L.geoJSON(r.geometry,{style:{weight:6,opacity:.9}}).addTo(map);
+ map.fitBounds(routeLine.getBounds(),{padding:[35,180]});
+ document.getElementById('routeInfo').innerHTML='<span class="pill">🚗 '+(r.distance/1609.34).toFixed(1)+' mi</span><span class="pill">⏱ '+Math.round(r.duration/60)+' min</span>';
+ let steps=(r.legs||[]).flatMap(l=>l.steps||[]);document.getElementById('steps').innerHTML=steps.slice(0,12).map(s=>'<div class="step">'+esc(s.maneuver?.instruction||s.name||'Continue')+'</div>').join('');
+ if(steps[0]?.maneuver?.instruction && 'speechSynthesis' in window) speechSynthesis.speak(new SpeechSynthesisUtterance(steps[0].maneuver.instruction));
+}
+function onPhotos(data){
+ const box=document.getElementById('photoBox');box.innerHTML='';
+ let pages=Object.values(data?.query?.pages||{});
+ pages.sort((a,b)=>scorePhoto(b)-scorePhoto(a));
+ pages.slice(0,4).forEach(p=>{let ii=p.imageinfo?.[0];if(!ii?.thumburl)return;let img=document.createElement('img');img.className='photo';img.src=ii.thumburl;img.title='Source: Wikimedia Commons — '+p.title;img.onclick=()=>window.open(ii.descriptionurl,'_blank');box.appendChild(img)});
+}
+function scorePhoto(p){let t=(p.title||'').toLowerCase();let bad=['person','people','crowd','selfie','portrait','group','interior','inside','wedding','party','concert'];let good=['building','exterior','facade','facade','storefront','entrance','street','front','sign'];return good.filter(x=>t.includes(x)).length*3-bad.filter(x=>t.includes(x)).length*5}
+function toggleAssistant(){let a=document.getElementById('assistant');a.style.display=a.style.display==='block'?'none':'block';document.getElementById('key').value=localStorage.getItem('openaiKey')||''}
+function saveKey(){localStorage.setItem('openaiKey',document.getElementById('key').value.trim());document.getElementById('answer').textContent='Saved on this phone.'}
+function command(){
+ let t=document.getElementById('cmd').value.trim();if(!t)return;
+ let low=t.toLowerCase(), target=t.replace(/^take me to\s+/i,'').replace(/^navigate to\s+/i,'').replace(/^go to\s+/i,'');
+ if(/where am i|my location|locate me/.test(low)){locate();return}
+ if(/satellite/.test(low)){if(!satOn)toggleSatellite();return}
+ if(/map|street map/.test(low)&&!(/satellite/.test(low))){if(satOn)toggleSatellite();return}
+ if(/^(take me|navigate|go)\s+to\s+/i.test(t)||/^find\s+/i.test(t)){document.getElementById('q').value=target.replace(/^find\s+/i,'');search();document.getElementById('answer').textContent='Searching for '+target+'…';return}
+ let key=localStorage.getItem('openaiKey')||'';Android.ask(key,t)
+}
+function onAssistant(text){document.getElementById('answer').textContent=text}
+function onError(e){document.getElementById('answer').textContent=e}
+document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+document.getElementById('cmd').addEventListener('keydown',e=>{if(e.key==='Enter')command()});
+</script>
+</body>
+</html>
